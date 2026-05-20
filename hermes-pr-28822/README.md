@@ -71,6 +71,16 @@ git push -u origin feat/kanban-promote-cli
 # 8. Open the PR with body from PR_BODY.md. Link issue #28822.
 ```
 
+## ✅ Sandbox-verified (2026-05-20)
+
+Applied the entire package to a fresh shallow clone of `main`, installed with `pip install -e ".[dev]"`, and ran:
+
+- `scripts/run_tests.sh tests/hermes_cli/test_kanban_promote.py -v` → **11/11 pass**
+- `scripts/run_tests.sh tests/hermes_cli/{test_kanban_db,test_kanban_db_init,test_kanban_core_functionality,test_kanban_cli}.py -q` → 368/370 pass (the 2 failures are pre-existing — missing optional `fastapi` for the dashboard plugin, unrelated to this PR)
+- Manual CLI smoke: `hermes kanban promote` works end-to-end for refuse/--force/--dry-run/--json/audit-event
+
+See `CHECKLIST.md` for verified insertion points and signature reference.
+
 ## ⚠️ Re-verify before pushing
 
 This file got 10 commits in 1 day on May 19, 2026. The codebase moves fast. Before pushing, fetch latest `upstream/main` and re-run `scripts/run_tests.sh` against your branch.

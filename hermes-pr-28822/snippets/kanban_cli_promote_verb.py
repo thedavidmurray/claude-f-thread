@@ -1,17 +1,19 @@
 """
-Paste these two blocks into hermes_cli/kanban.py.
+Paste these THREE blocks into hermes_cli/kanban.py.
+
+Verified against main on 2026-05-20 (commit chain ending at 34120a0).
+Tested end-to-end in a sandbox with `scripts/run_tests.sh` — 11/11 tests
+pass, manual CLI smoke succeeds for --json / --force / --dry-run / refusal.
 
 PART 1 — subparser registration. Insertion point: inside `build_parser()`,
-grouped with the other state-transition verbs. Recommended: directly after
-the `unblock` subparser registration.
+directly before `p_archive = sub.add_parser("archive", ...)`.
 
-PART 2 — handler function. Insertion point: anywhere among the existing
-`_cmd_*` functions. Recommended: directly after `_cmd_unblock`.
+PART 2 — handler function. Insertion point: directly before
+`def _cmd_archive(args: argparse.Namespace) -> int:`.
 
-PART 3 — dispatch wiring. If kanban.py has an explicit handler map
-(`COMMANDS = {"block": _cmd_block, ...}`), add `"promote": _cmd_promote`
-there. If it uses `args.kanban_action` lookup via `globals()` or
-`getattr`, no additional wiring is needed.
+PART 3 — dispatch wiring. There's an explicit handler dict around line
+~899 (`handlers = { "block": _cmd_block, ... }`). Add the promote entry
+directly after `"unblock":  _cmd_unblock,`.
 """
 
 # ============================================================
@@ -51,7 +53,7 @@ p_promote.add_argument(
 
 
 # ============================================================
-# PART 2 — handler function (paste at module level near other _cmd_*)
+# PART 2 — handler function
 # ============================================================
 
 # === BEGIN PASTE 2 ===
@@ -93,3 +95,14 @@ def _cmd_promote(args: argparse.Namespace) -> int:
     return 0
 
 # === END PASTE 2 ===
+
+
+# ============================================================
+# PART 3 — dispatch wiring (one line, in the existing handlers dict)
+# ============================================================
+
+# === BEGIN PASTE 3 ===
+
+        "promote":  _cmd_promote,
+
+# === END PASTE 3 ===
