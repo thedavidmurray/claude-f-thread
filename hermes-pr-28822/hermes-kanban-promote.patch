@@ -1,0 +1,335 @@
+diff --git a/hermes_cli/kanban.py b/hermes_cli/kanban.py
+index 4e975bb..a861a6f 100644
+--- a/hermes_cli/kanban.py
++++ b/hermes_cli/kanban.py
+@@ -550,6 +550,33 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
+     p_unblock = sub.add_parser("unblock", help="Return one or more blocked/scheduled tasks to ready")
+     p_unblock.add_argument("task_ids", nargs="+")
+ 
++    p_promote = sub.add_parser(
++        "promote",
++        help="Manually move a todo/blocked task to ready (recovery path)",
++    )
++    p_promote.add_argument("task_id")
++    p_promote.add_argument(
++        "reason",
++        nargs="*",
++        help="Audit-trail reason (recorded on the task_events row)",
++    )
++    p_promote.add_argument(
++        "--force",
++        action="store_true",
++        help="Promote even if parent dependencies are not yet done/archived",
++    )
++    p_promote.add_argument(
++        "--dry-run",
++        action="store_true",
++        help="Validate the promotion without mutating state",
++    )
++    p_promote.add_argument(
++        "--json",
++        dest="json",
++        action="store_true",
++        help="Emit machine-readable JSON result",
++    )
++
+     p_archive = sub.add_parser("archive", help="Archive one or more tasks")
+     p_archive.add_argument("task_ids", nargs="*",
+                            help="Task ids to archive (default mode)")
+@@ -899,6 +926,7 @@ def kanban_command(args: argparse.Namespace) -> int:
+         "block":    _cmd_block,
+         "schedule": _cmd_schedule,
+         "unblock":  _cmd_unblock,
++        "promote":  _cmd_promote,
+         "archive":  _cmd_archive,
+         "tail":     _cmd_tail,
+         "dispatch": _cmd_dispatch,
+@@ -1955,6 +1983,43 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
+     return 0 if not failed else 1
+ 
+ 
++def _cmd_promote(args: argparse.Namespace) -> int:
++    reason = " ".join(args.reason).strip() if args.reason else None
++    author = _profile_author()
++    as_json = getattr(args, "json", False)
++    with kb.connect() as conn:
++        ok, err = kb.promote_task(
++            conn,
++            args.task_id,
++            actor=author,
++            reason=reason,
++            force=bool(args.force),
++            dry_run=bool(args.dry_run),
++        )
++    if as_json:
++        print(json.dumps(
++            {
++                "task_id": args.task_id,
++                "promoted": ok,
++                "dry_run": bool(args.dry_run),
++                "forced": bool(args.force),
++                "reason": reason,
++                "error": err,
++            },
++            indent=2,
++            ensure_ascii=False,
++        ))
++        return 0 if ok else 1
++    if not ok:
++        print(f"cannot promote {args.task_id}: {err}", file=sys.stderr)
++        return 1
++    tag = " (dry)" if args.dry_run else ""
++    label = "Would promote" if args.dry_run else "Promoted"
++    print(f"{label} {args.task_id} -> ready{tag}"
++          + (f": {reason}" if reason else ""))
++    return 0
++
++
+ def _cmd_archive(args: argparse.Namespace) -> int:
+     ids = list(args.task_ids or [])
+     purge_ids = list(getattr(args, "purge_ids", None) or [])
+diff --git a/hermes_cli/kanban_db.py b/hermes_cli/kanban_db.py
+index d557354..7163163 100644
+--- a/hermes_cli/kanban_db.py
++++ b/hermes_cli/kanban_db.py
+@@ -3030,6 +3030,77 @@ def block_task(
+         return True
+ 
+ 
++
++def promote_task(
++    conn: sqlite3.Connection,
++    task_id: str,
++    *,
++    actor: str,
++    reason: Optional[str] = None,
++    force: bool = False,
++    dry_run: bool = False,
++) -> tuple[bool, Optional[str]]:
++    """Manually promote a `todo` or `blocked` task to `ready`.
++
++    Mirrors the automatic promotion done by ``recompute_ready`` but
++    drives it from a deliberate operator action with an audit-trail
++    entry. Refuses to promote if any parent dep is not in a terminal
++    state (`done`/`archived`) unless ``force=True``. Does NOT change
++    assignee or claim state. Returns ``(True, None)`` on success and
++    ``(False, reason)`` if refused. ``dry_run=True`` validates the
++    promotion would succeed without mutating state.
++    """
++    row = conn.execute(
++        "SELECT status FROM tasks WHERE id = ?", (task_id,)
++    ).fetchone()
++    if row is None:
++        return False, f"task {task_id} not found"
++
++    cur_status = row["status"]
++    if cur_status not in ("todo", "blocked"):
++        return False, (
++            f"task {task_id} is {cur_status!r}; promote only applies to "
++            f"'todo' or 'blocked'"
++        )
++
++    if not force:
++        parents = conn.execute(
++            "SELECT t.id, t.status FROM tasks t "
++            "JOIN task_links l ON l.parent_id = t.id "
++            "WHERE l.child_id = ?",
++            (task_id,),
++        ).fetchall()
++        unsatisfied = [
++            p["id"] for p in parents
++            if p["status"] not in ("done", "archived")
++        ]
++        if unsatisfied:
++            return False, (
++                f"unsatisfied parent dependencies: "
++                f"{', '.join(unsatisfied)} (use --force to override)"
++            )
++
++    if dry_run:
++        return True, None
++
++    with write_txn(conn):
++        upd = conn.execute(
++            "UPDATE tasks SET status = 'ready' "
++            "WHERE id = ? AND status IN ('todo', 'blocked')",
++            (task_id,),
++        )
++        if upd.rowcount != 1:
++            return False, f"task {task_id} status changed during promotion"
++        _append_event(
++            conn,
++            task_id,
++            "promoted_manual",
++            {"actor": actor, "reason": reason, "forced": force},
++        )
++
++    return True, None
++
++
+ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
+     """Transition ``blocked``/``scheduled`` -> ready or todo.
+ 
+diff --git a/tests/hermes_cli/test_kanban_promote.py b/tests/hermes_cli/test_kanban_promote.py
+new file mode 100644
+index 0000000..00bbfec
+--- /dev/null
++++ b/tests/hermes_cli/test_kanban_promote.py
+@@ -0,0 +1,157 @@
++"""Tests for the kanban `promote` verb (issue #28822).
++
++The realistic bug scenario from #28822 is: a child task ends up in
++``todo`` with all its parents already ``done`` (because the
++auto-promote daemon hasn't run, or a manual close raced it).
++Direct-SQL setup is used to construct that state deterministically.
++"""
++
++from __future__ import annotations
++
++import json
++from pathlib import Path
++
++import pytest
++
++from hermes_cli import kanban_db as kb
++
++
++@pytest.fixture
++def kanban_home(tmp_path, monkeypatch):
++    home = tmp_path / ".hermes"
++    home.mkdir()
++    monkeypatch.setenv("HERMES_HOME", str(home))
++    monkeypatch.setattr(Path, "home", lambda: tmp_path)
++    db_path = kb.kanban_db_path(board="default")
++    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
++    kb.init_db()
++    return home
++
++
++@pytest.fixture
++def conn(kanban_home):
++    with kb.connect() as c:
++        yield c
++
++
++def _stuck_todo(conn, *, parents_done=True, n_parents=1):
++    """Build the #28822 scenario: child in 'todo' whose parents may
++    have closed as 'done' without the auto-promote logic firing.
++    """
++    parent_ids = [
++        kb.create_task(conn, title=f"parent{i}", assignee="setup")
++        for i in range(n_parents)
++    ]
++    child_id = kb.create_task(
++        conn, title="child", parents=parent_ids, assignee="setup"
++    )
++    assert kb.get_task(conn, child_id).status == "todo"
++    if parents_done:
++        for pid in parent_ids:
++            conn.execute(
++                "UPDATE tasks SET status='done' WHERE id=?", (pid,)
++            )
++    return child_id, parent_ids
++
++
++def test_promote_stuck_todo_succeeds(conn):
++    child, _ = _stuck_todo(conn, parents_done=True)
++    ok, err = kb.promote_task(conn, child, actor="tester")
++    assert ok and err is None
++    assert kb.get_task(conn, child).status == "ready"
++
++
++def test_promote_refuses_when_parent_not_done(conn):
++    child, parents = _stuck_todo(conn, parents_done=False)
++    ok, err = kb.promote_task(conn, child, actor="tester")
++    assert ok is False
++    assert err is not None and "unsatisfied parent dependencies" in err
++    assert parents[0] in err
++    assert kb.get_task(conn, child).status == "todo"
++
++
++def test_promote_with_force_bypasses_dependency_check(conn):
++    child, _ = _stuck_todo(conn, parents_done=False)
++    ok, err = kb.promote_task(
++        conn, child, actor="tester", reason="recovery", force=True
++    )
++    assert ok and err is None
++    assert kb.get_task(conn, child).status == "ready"
++
++
++def test_promote_emits_audit_event(conn):
++    child, _ = _stuck_todo(conn, parents_done=True)
++    kb.promote_task(conn, child, actor="tester", reason="manual recovery")
++    ev = conn.execute(
++        "SELECT kind, payload FROM task_events "
++        "WHERE task_id = ? AND kind = 'promoted_manual'",
++        (child,),
++    ).fetchone()
++    assert ev is not None
++    payload = json.loads(ev["payload"])
++    assert payload["actor"] == "tester"
++    assert payload["reason"] == "manual recovery"
++    assert payload["forced"] is False
++
++
++def test_promote_force_records_forced_flag(conn):
++    child, _ = _stuck_todo(conn, parents_done=False)
++    kb.promote_task(conn, child, actor="tester", force=True, reason="r")
++    ev = conn.execute(
++        "SELECT payload FROM task_events "
++        "WHERE task_id = ? AND kind = 'promoted_manual'",
++        (child,),
++    ).fetchone()
++    assert json.loads(ev["payload"])["forced"] is True
++
++
++def test_promote_does_not_change_assignee(conn):
++    child, _ = _stuck_todo(conn, parents_done=True)
++    before = kb.get_task(conn, child).assignee
++    kb.promote_task(conn, child, actor="someone_else")
++    after = kb.get_task(conn, child).assignee
++    assert before == after
++
++
++def test_promote_dry_run_does_not_mutate(conn):
++    child, _ = _stuck_todo(conn, parents_done=True)
++    ok, err = kb.promote_task(conn, child, actor="tester", dry_run=True)
++    assert ok and err is None
++    assert kb.get_task(conn, child).status == "todo"
++    n = conn.execute(
++        "SELECT COUNT(*) AS n FROM task_events "
++        "WHERE task_id = ? AND kind = 'promoted_manual'",
++        (child,),
++    ).fetchone()["n"]
++    assert n == 0
++
++
++def test_promote_dry_run_reports_dependency_failure(conn):
++    child, _ = _stuck_todo(conn, parents_done=False)
++    ok, err = kb.promote_task(conn, child, actor="tester", dry_run=True)
++    assert ok is False
++    assert err is not None and "unsatisfied" in err
++
++
++def test_promote_rejects_non_todo_status(conn):
++    tid = kb.create_task(conn, title="standalone")
++    assert kb.get_task(conn, tid).status == "ready"
++    ok, err = kb.promote_task(conn, tid, actor="tester")
++    assert ok is False
++    assert "'ready'" in err and "promote only applies" in err
++
++
++def test_promote_rejects_unknown_task(conn):
++    ok, err = kb.promote_task(conn, "t_doesnotexist", actor="tester")
++    assert ok is False
++    assert err is not None and "not found" in err
++
++
++def test_promote_blocked_task_works(conn):
++    tid = kb.create_task(conn, title="t")
++    conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (tid,))
++    ok, err = kb.promote_task(
++        conn, tid, actor="tester", reason="ready now"
++    )
++    assert ok and err is None
++    assert kb.get_task(conn, tid).status == "ready"

@@ -40,36 +40,49 @@ A new `hermes kanban promote <task_id>` CLI verb that manually moves a task from
 
 ## Transfer instructions (from desktop)
 
+The fastest path uses the pre-generated patch (`hermes-kanban-promote.patch`). It applies cleanly against `main` of `NousResearch/hermes-agent` as of 2026-05-20.
+
 ```bash
-# 1. Fork NousResearch/hermes-agent on GitHub, then:
-git clone git@github.com:<you>/hermes-agent.git
+# 1. Fork NousResearch/hermes-agent on GitHub via the web UI, then:
+git clone git@github.com:<your-gh-username>/hermes-agent.git
 cd hermes-agent
 git remote add upstream https://github.com/NousResearch/hermes-agent.git
 git fetch upstream
 git checkout -b feat/kanban-promote-cli upstream/main
 
-# 2. Set up the venv per CONTRIBUTING.md (prefer .venv over venv)
+# 2. Download the patch from the scratch repo (one of):
+#    a) Browse to the scratch PR, copy hermes-kanban-promote.patch
+#    b) Or curl it from the raw URL once you've located the file in PR #1
+curl -fsSLO https://raw.githubusercontent.com/thedavidmurray/claude-f-thread/claude/hermes-kanban-pr1-gS5hC/hermes-pr-28822/hermes-kanban-promote.patch
+
+# 3. Apply it
+git apply hermes-kanban-promote.patch
+# (dry-run first with --check if you want)
+
+# 4. Set up venv per CONTRIBUTING.md
 python -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e ".[dev]"
 
-# 3. Apply snippets to source files (see CHECKLIST.md for exact insertion points).
+# 5. Run the test the way CI will run it (verified passing in sandbox)
+scripts/run_tests.sh tests/hermes_cli/test_kanban_promote.py -v
+# expect: 11 passed
 
-# 4. Drop the test file in:
-cp /path/to/this/package/tests/test_kanban_promote.py tests/hermes_cli/
-
-# 5. Run the hermetic test wrapper (NOT raw pytest)
-scripts/run_tests.sh tests/hermes_cli/test_kanban_promote.py -q
-
-# 6. Manually test per the verification steps in CHECKLIST.md.
-
-# 7. Commit with Conventional Commits format
-git add -A
+# 6. Commit (Conventional Commits format)
+git add hermes_cli/kanban.py hermes_cli/kanban_db.py tests/hermes_cli/test_kanban_promote.py
 git commit -m "feat(cli): kanban promote verb for manual todo->ready recovery"
 git push -u origin feat/kanban-promote-cli
 
-# 8. Open the PR with body from PR_BODY.md. Link issue #28822.
+# 7. Open the PR via web UI:
+#    Base: NousResearch/hermes-agent main
+#    Head: <your-gh-username>/hermes-agent feat/kanban-promote-cli
+#    Body: paste from PR_BODY.md
+#    Link issue #28822 in the body
 ```
+
+If the patch fails to apply because upstream has churned, the snippets in `snippets/` and the verified insertion points in `CHECKLIST.md` are the fallback — they're more robust to file shifts than the patch.
+
+## Fallback (if patch doesn't apply)
 
 ## ✅ Sandbox-verified (2026-05-20)
 
